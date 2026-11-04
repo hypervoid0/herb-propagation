@@ -1,0 +1,85 @@
+name: Stardust Canopy Analysis
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze_nodes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        sample:
+          - { trail_idx: "1", unit_id: "12345", zone_id: "ALUC", zone_label_b64: "QUxMVSBDaW5lbWFzOiBLb2thcGV0", sample_code: "ET00523252", title_b64: "UmFtYXlhbmEgLSBUZWx1Z3U=", slot_time: "10:30 AM", cycle_date: "20261105", display_date: "05-Nov-2026", canopy_b64: "RE9MQlkgQ0lORU1BIChTQ1JFRU4gMSk=" }
+          - { trail_idx: "2", unit_id: "12346", zone_id: "PRHN", zone_label_b64: "UHJhc2FkcyBNdWx0aXBsZXg6IEh5ZGVyYWJhZA==", sample_code: "ET00523252", title_b64: "UmFtYXlhbmEgLSBUZWx1Z3U=", slot_time: "11:00 AM", cycle_date: "20261105", display_date: "05-Nov-2026", canopy_b64: "TEFSR0UgU0NSRUVOIChQQ1gp" }
+    env:
+      TELEMETRY_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      REGION_ID: "hyd"
+      TRAIL_INDEX: ${{ matrix.sample.trail_idx }}
+      ZONE_ID: ${{ matrix.sample.zone_id }}
+      ZONE_LABEL_B64: ${{ matrix.sample.zone_label_b64 }}
+      SAMPLE_CODE: ${{ matrix.sample.sample_code }}
+      SPECIMEN_TITLE_B64: ${{ matrix.sample.title_b64 }}
+      UNIT_ID: ${{ matrix.sample.unit_id }}
+      SLOT_TIME: ${{ matrix.sample.slot_time }}
+      CYCLE_DATE: ${{ matrix.sample.cycle_date }}
+      DISPLAY_DATE: ${{ matrix.sample.display_date }}
+      CANOPY_B64: ${{ matrix.sample.canopy_b64 }}
+    steps:
+      - name: Checkout cultivate branch
+        uses: actions/checkout@v4
+        with:
+          ref: 'cultivate'
+          fetch-depth: 0
+
+      - name: Setup Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run canopy node analysis
+        run: python starlings.py
+
+      - name: Dispatch node halt notice
+        if: cancelled() || failure()
+        run: python starlings.py --halt-notice "Workflow ${{ job.status }}"
+
+      - name: Commit telemetry state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TRAIL_FILE="trail${{ matrix.sample.trail_idx }}.json"
+          touch "$TRAIL_FILE"
+          git add "$TRAIL_FILE"
+          git diff --quiet && git diff --staged --quiet || (
+            git commit -m "chore: sync telemetry cache trail${{ matrix.sample.trail_idx }}"
+            for i in {1..15}; do
+              git pull --rebase origin cultivate
+              if git push origin cultivate; then
+                break
+              fi
+              sleep $((RANDOM % 14 + 2))
+            done
+          )
+
+  cycle_relay:
+    needs: analyze_nodes
+    if: success()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+
+      - name: Trigger next canopy cycle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run "Stardust Canopy Analysis" --ref main

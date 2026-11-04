@@ -1,0 +1,79 @@
+name: Moisture Control Telemetry
+
+on:
+  workflow_dispatch:
+
+jobs:
+  monitor_humidity:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TELEMETRY_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    steps:
+      - name: Checkout cultivate branch
+        uses: actions/checkout@v4
+        with:
+          ref: 'cultivate'
+          fetch-depth: 0
+
+      - name: Initialize network relay tunnel
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update && sudo apt-get install -y cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp
+          sudo warp-cli --accept-tos connect
+          sleep 5
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "ip=|warp="
+
+      - name: Setup Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Execute seedling sensor poll
+        run: python seedlings.py
+
+      - name: Dispatch sensor halt notice
+        if: cancelled() || failure()
+        run: python seedlings.py --halt-notice "Workflow ${{ job.status }}"
+
+      - name: Commit telemetry state
+        if: always()
+        run: |
+          sudo warp-cli --accept-tos disconnect || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          touch startrail.json
+          git add startrail.json trail*.json 2>/dev/null || git add startrail.json
+          git diff --quiet && git diff --staged --quiet || (
+            git commit -m "chore: sync telemetry cache"
+            for i in {1..10}; do
+              git pull --rebase origin cultivate
+              if git push origin cultivate; then
+                break
+              fi
+              sleep $((RANDOM % 10 + 2))
+            done
+          )
+
+  cycle_relay:
+    needs: monitor_humidity
+    if: success()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+
+      - name: Trigger next moisture cycle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run "Moisture Control Telemetry" --ref main
